@@ -17,17 +17,19 @@ logger = init_logger(__name__)
 
 class NoOpEliminationPass(VllmInductorPass):
     """
-    This is an inductor pass that removes redundant reshape/slice operations.
-    It is required for RMSNorm-quant fusion to work properly.
-    That's because apply_fp8_linear adds a reshape, which is redundant
-    in the 2D-case. Additionally, torch internal no-op elimination pass does
-    not handle certain slice variants.
+    This is an inductor pass that removes redundant reshape/view/slice
+    operations.  It is required for RMSNorm-quant fusion and
+    allreduce-rmsnorm fusion to work properly.  ``apply_fp8_linear`` adds
+    a reshape that is redundant in the 2D case, and some models (e.g.
+    DeepSeek MoE) insert an identity ``view`` after ``all_reduce`` that
+    blocks pattern matching.  Additionally, torch's internal no-op
+    elimination pass does not handle certain slice variants.
 
     Cases handled:
-      1. A chain of reshapes is equivalent to the last reshape called on the
-      base tensor (input of the first reshape).
-      2. A reshape that produces the shape of the input is redundant
-      3. A slice that produces the shape of the input is redundant
+      1. A chain of reshapes/views is equivalent to the last reshape/view
+         called on the base tensor (input of the first reshape/view).
+      2. A reshape/view that produces the shape of the input is redundant.
+      3. A slice that produces the shape of the input is redundant.
 
     Example graph 1:
     mul_1: "f16[s0, 4096]" = ...
@@ -62,27 +64,45 @@ class NoOpEliminationPass(VllmInductorPass):
     scaled_mm: "f16[s0, 4096]" = ...
     at = auto_functionalized(fused_add_rms_norm, input = scaled_mm, ...)
     out: "f16[s0, 4096]" = at[1]
+
+    Example graph 4 (identity view after all_reduce):
+    all_reduce: "f16[s0, 7168]" = torch.ops.vllm.all_reduce(...)
+    view_1: "f16[s0, 7168]" = torch.ops.aten.view(all_reduce, [s0, 7168])
+    rmsnorm = fused_add_rms_norm(input = view_1, ...)
+
+    Can be replaced with:
+    all_reduce: "f16[s0, 7168]" = torch.ops.vllm.all_reduce(...)
+    rmsnorm = fused_add_rms_norm(input = all_reduce, ...)
     """
+
+    RESHAPE_VIEW_OPS = (
+        torch.ops.aten.reshape.default,
+        torch.ops.aten.view.default,
+    )
+
+    def _is_reshape_or_view(self, node: torch.fx.Node) -> bool:
+        return is_func(node, self.RESHAPE_VIEW_OPS[0]) or is_func(
+            node, self.RESHAPE_VIEW_OPS[1]
+        )
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph) -> None:
         count = 0
-        # Remove no-op reshapes/views:
         for node in graph.nodes:
-            if is_func(node, torch.ops.aten.reshape.default):
-                # Case 1: rewrite reshape chains to reshapes on the base tensor
+            if self._is_reshape_or_view(node):
+                # Case 1: rewrite reshape/view chains to operate on
+                # the base tensor directly.
                 input = node.args[0]
-                # If the input is a reshape, rebind to that node
-                if is_func(input, torch.ops.aten.reshape.default):
-                    # The new input is guaranteed not to be a reshape,
-                    # because we process nodes in order
+                if self._is_reshape_or_view(input):
+                    # The new input is guaranteed not to be a
+                    # reshape/view, because we process nodes in order.
                     node.update_arg(0, input.args[0])
                     if len(input.users) == 0:
                         graph.erase_node(input)
                         count += 1
 
-            # remove reshape/slice if it produces the original shape
-            if is_func(node, torch.ops.aten.reshape.default) or is_func(
+            # Case 2: remove reshape/view/slice producing original shape
+            if self._is_reshape_or_view(node) or is_func(
                 node, torch.ops.aten.slice.Tensor
             ):
                 input = node.args[0]
@@ -102,7 +122,7 @@ class NoOpEliminationPass(VllmInductorPass):
                     graph.erase_node(node)
                     count += 1
 
-        logger.debug("Removed %s no-op reshapes and slices", count)
+        logger.debug("Removed %s no-op reshapes, views, and slices", count)
 
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
