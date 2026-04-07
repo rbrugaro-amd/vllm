@@ -18,6 +18,7 @@ from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
+    from .fusion.fuse_mla_dual_rms_norm import MLADualRMSNormFusionPass
     from .fusion.rocm_aiter_fusion import (
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
@@ -150,6 +151,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
+            if (self.pass_config.fuse_mla_dual_rms_norm
+                    and rocm_aiter_ops.is_enabled()):
+                self.passes += [MLADualRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
