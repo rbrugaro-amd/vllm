@@ -88,6 +88,14 @@ def _ensure_op_registered() -> None:
 # FX graph pass
 # ---------------------------------------------------------------------------
 
+# Matches both the ROCm/aiter lowered op and the vllm_ir intermediate op.
+# vLLM >=0.19 uses vllm_ir.rms_norm at the post-grad stage; IR lowering
+# to rocm_aiter_rms_norm happens in a later pass.
+_RMS_NORM_TARGET_NAMES = frozenset([
+    "vllm::rocm_aiter_rms_norm",
+    "vllm_ir::rms_norm",
+])
+
 
 class MLADualRMSNormFusionPass(VllmInductorPass):
     """
@@ -154,7 +162,8 @@ class MLADualRMSNormFusionPass(VllmInductorPass):
     def _is_rms_norm(node: fx.Node) -> bool:
         if node.op != "call_function":
             return False
-        return node.target is torch.ops.vllm.rocm_aiter_rms_norm.default
+        name = getattr(node.target, "_name", None)
+        return name is not None and name in _RMS_NORM_TARGET_NAMES
 
     @staticmethod
     def _is_getitem(node: fx.Node, *, index: int) -> bool:
