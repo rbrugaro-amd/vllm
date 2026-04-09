@@ -107,10 +107,12 @@ class MLADualRMSNormFusionPass(VllmInductorPass):
     def __init__(self, config: VllmConfig):
         super().__init__(config)
         _ensure_op_registered()
+        self.matched_count: int = 0
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         count = self._fuse_mla_rms_norms(graph)
+        self.matched_count += count
         if count > 0:
             graph.lint()
             logger.info(
