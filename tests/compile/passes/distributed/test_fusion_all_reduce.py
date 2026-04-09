@@ -43,7 +43,14 @@ from vllm.utils.torch_utils import set_random_seed
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6, use_aiter=False):
+    def __init__(
+        self,
+        hidden_size=16,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.float16,
+        use_aiter: bool = False,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -85,7 +92,9 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(
+        self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -95,6 +104,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
                 weight_shape=(hidden_size, hidden_size),
                 activation_quant_key=self.quant_key,
                 weight_quant_key=self.quant_key,
+                input_dtype=dtype,
             )
             for i in range(3)
         ]
@@ -134,7 +144,9 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(
+        self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -369,7 +381,7 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(hidden_size, token_num, use_aiter=use_aiter)
+        model = test_model_cls(hidden_size, token_num, dtype=dtype, use_aiter=use_aiter)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 
