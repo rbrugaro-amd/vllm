@@ -368,9 +368,9 @@ def all_reduce_fusion_pass_on_test_model(
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = (
-            AllReduceFusionPass(vllm_config)
+            RocmAiterAllReduceFusionPass(vllm_config)
             if use_aiter
-            else RocmAiterAllReduceFusionPass(vllm_config)
+            else AllReduceFusionPass(vllm_config)
         )
         noop_pass = NoOpEliminationPass(vllm_config)
         func_pass = FixFunctionalizationPass(vllm_config)
