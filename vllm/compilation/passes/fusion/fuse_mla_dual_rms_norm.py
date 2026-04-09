@@ -240,8 +240,12 @@ class MLADualRMSNormFusionPass(VllmInductorPass):
     ) -> None:
         kv_split = kv_c.args[0]
         kv_lora = kv_split.args[0]
+        q_split = q_c.args[0]
 
-        # Hoist kv split chain so both inputs are available early
+        # Hoist nodes to ensure topological order:
+        # q_split -> q_c -> kv_lora -> kv_split -> kv_c -> [fused]
+        q_split.append(q_c)
+        q_c.append(kv_lora)
         kv_lora.append(kv_split)
         kv_split.append(kv_c)
 
