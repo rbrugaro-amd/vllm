@@ -114,7 +114,7 @@ def test_fuse_mla_dual_rms_norm(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.passes.fusion.fuse_mla_dual_rms_norm import (
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             MLADualRMSNormFusionPass,
         )
 

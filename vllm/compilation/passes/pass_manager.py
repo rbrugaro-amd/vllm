@@ -18,8 +18,8 @@ from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
-    from .fusion.fuse_mla_dual_rms_norm import MLADualRMSNormFusionPass
     from .fusion.rocm_aiter_fusion import (
+        MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
