@@ -4,7 +4,7 @@
 Unit test for the MLADualRMSNormFusionPass.
 
 The pass fuses paired q/kv RMS norms in MLA attention into a single
-fused_mla_dual_rms_norm op backed by AITer's fused_qk_rmsnorm kernel.
+fused_mla_dual_rms_norm op backed by AITER's fused_qk_rmsnorm kernel.
 """
 
 import pytest

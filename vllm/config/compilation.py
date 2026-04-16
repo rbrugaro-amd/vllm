@@ -275,7 +275,7 @@ class PassConfig:
             self.fuse_act_padding = False
         if self.fuse_mla_dual_rms_norm and not current_platform.is_rocm():
             logger.warning_once(
-                "MLA dual RMS norm fusion requires ROCm/AITer. "
+                "MLA dual RMS norm fusion requires ROCm/AITER. "
                 "The fusion will be disabled."
             )
             self.fuse_mla_dual_rms_norm = False

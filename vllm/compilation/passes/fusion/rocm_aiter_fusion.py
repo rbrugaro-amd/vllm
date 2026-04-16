@@ -515,68 +515,37 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
         return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)
 
 
-# ---------------------------------------------------------------------------
-# MLA Dual RMS Norm Fusion (DeepSeek-V3 / Kimi-K2)
-#
-# Fuses paired q_a_layernorm + kv_a_layernorm in MLA attention into
-# aiter's fused_qk_rmsnorm HIP kernel.
-#
-# Target FX-graph pattern (unfused, vllm_ir stage):
-#     gemm -> split_with_sizes([q_dim, kv_dim])
-#         +-- q_c     -> vllm_ir.rms_norm(q_c, q_w, eps)
-#         +-- kv_lora -> split_with_sizes([kv_c_dim, k_pe_dim])
-#                         +-- kv_c -> vllm_ir.rms_norm(kv_c, kv_w, eps)
-#                         +-- k_pe
-# ---------------------------------------------------------------------------
-
-_MLA_DEVICE = torch.device("cuda")
-
-
-def _mla_empty_bf16(*shape: int) -> torch.Tensor:
-    return torch.empty(*shape, dtype=torch.bfloat16, device=_MLA_DEVICE)
-
-
-# DeepSeek-V3 / Kimi-K2 MLA geometry
-_MLA_Q_DIM = 1536
-_MLA_KV_C_DIM = 512
-_MLA_K_PE_DIM = 64
-
-
 class MLADualRMSNormPattern:
     """
-    Match the paired q/kv RMS norm topology in MLA attention and replace
-    with a single fused_mla_dual_rms_norm call.
+    Fuse paired q_a_layernorm + kv_a_layernorm in MLA attention into
+    AITER's ``fused_qk_rmsnorm`` HIP kernel.
+
+    Target FX-graph pattern (unfused, ``vllm_ir`` stage)::
+
+        gemm -> split_with_sizes([q_dim, kv_dim])
+            +-- q_c     -> vllm_ir.rms_norm(q_c, q_w, eps)
+            +-- kv_lora -> split_with_sizes([kv_c_dim, k_pe_dim])
+                            +-- kv_c -> vllm_ir.rms_norm(kv_c, kv_w, eps)
+                            +-- k_pe
 
     The pattern covers the connected subgraph rooted at the first
-    split_with_sizes (which produces q_c and kv_lora), through the
-    two rms_norm calls, and the k_pe passthrough.
+    ``split_with_sizes`` (which produces ``q_c`` and ``kv_lora``),
+    through the two ``rms_norm`` calls, and the ``k_pe`` passthrough.
     """
 
-    def __init__(
-        self,
-        q_dim: int,
-        kv_c_dim: int,
-        k_pe_dim: int,
-        epsilon: float,
-    ) -> None:
-        self.q_dim = q_dim
-        self.kv_dim = kv_c_dim + k_pe_dim
-        self.kv_c_dim = kv_c_dim
-        self.k_pe_dim = k_pe_dim
+    def __init__(self, epsilon: float) -> None:
         self.epsilon = epsilon
 
     def get_inputs(self) -> list[torch.Tensor]:
-        T = 5
-        projected = _mla_empty_bf16(T, self.q_dim + self.kv_dim)
-        q_weight = _mla_empty_bf16(self.q_dim)
-        kv_weight = _mla_empty_bf16(self.kv_c_dim)
+        # Arbitrary dims — pattern matching is shape-agnostic.
+        q_dim, kv_c_dim, k_pe_dim = 8, 4, 2
+        projected = torch.empty(5, q_dim + kv_c_dim + k_pe_dim,
+                                dtype=torch.bfloat16)
+        q_weight = torch.empty(q_dim, dtype=torch.bfloat16)
+        kv_weight = torch.empty(kv_c_dim, dtype=torch.bfloat16)
         return [projected, q_weight, kv_weight]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        q_dim = self.q_dim
-        kv_dim = self.kv_dim
-        kv_c_dim = self.kv_c_dim
-        k_pe_dim = self.k_pe_dim
         eps = self.epsilon
 
         def pattern(
@@ -584,6 +553,12 @@ class MLADualRMSNormPattern:
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Derive split sizes from input shapes so the pattern
+            # re-traces correctly with any model's actual dimensions.
+            q_dim = q_weight.shape[0]
+            kv_dim = projected.shape[-1] - q_dim
+            kv_c_dim = kv_weight.shape[0]
+            k_pe_dim = kv_dim - kv_c_dim
             q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
             kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
             q_normed = vllm.ir.ops.rms_norm(q_c, q_weight, eps)
@@ -595,6 +570,10 @@ class MLADualRMSNormPattern:
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q_dim = q_weight.shape[0]
+            kv_dim = projected.shape[-1] - q_dim
+            kv_c_dim = kv_weight.shape[0]
+            k_pe_dim = kv_dim - kv_c_dim
             q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
             kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
             result = torch.ops.vllm.fused_mla_dual_rms_norm(
@@ -627,12 +606,7 @@ class MLADualRMSNormFusionPass(VllmPatternMatcherPass):
         )
 
         for epsilon in [1e-5, 1e-6]:
-            MLADualRMSNormPattern(
-                q_dim=_MLA_Q_DIM,
-                kv_c_dim=_MLA_KV_C_DIM,
-                k_pe_dim=_MLA_K_PE_DIM,
-                epsilon=epsilon,
-            ).register(self.patterns)
+            MLADualRMSNormPattern(epsilon).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
