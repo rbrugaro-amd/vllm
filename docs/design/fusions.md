@@ -354,6 +354,12 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 !!! info
     ROCm/AITER-only. Targeted at DeepSeek-V3 / Kimi-K2 MLA attention.
 
+!!! note
+    When the native implementation of `rms_norm` is used (the default on CUDA and
+    ROCm for now), Inductor's built-in fusion already handles merging these norms
+    automatically. This explicit pass targets the case where AITER's custom
+    `rms_norm` op is active, which Inductor cannot fuse on its own.
+
 **What it fuses.** Fuses the paired `q_a_layernorm` and `kv_a_layernorm` RMS norm
 operations in MLA attention into a single `fused_qk_rmsnorm` HIP kernel call via AITER,
 reducing kernel launch overhead from 2 launches to 1 per MLA layer.

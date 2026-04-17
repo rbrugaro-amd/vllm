@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -21,7 +22,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    VllmPatternReplacement,
+)
 from .act_quant_fusion import ActivationQuantPattern
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
@@ -515,7 +521,9 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
         return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)
 
 
-class MLADualRMSNormPattern:
+class MLADualRMSNormPattern(
+    VllmPatternReplacement[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+):
     """
     Fuse paired q_a_layernorm + kv_a_layernorm in MLA attention into
     AITER's ``fused_qk_rmsnorm`` HIP kernel.
@@ -534,27 +542,29 @@ class MLADualRMSNormPattern:
     """
 
     def __init__(self, epsilon: float) -> None:
-        self.epsilon = epsilon
+        self._epsilon = epsilon
 
     def get_inputs(self) -> list[torch.Tensor]:
-        # Arbitrary dims — pattern matching is shape-agnostic.
         q_dim, kv_c_dim, k_pe_dim = 8, 4, 2
-        projected = torch.empty(5, q_dim + kv_c_dim + k_pe_dim,
-                                dtype=torch.bfloat16)
-        q_weight = torch.empty(q_dim, dtype=torch.bfloat16)
-        kv_weight = torch.empty(kv_c_dim, dtype=torch.bfloat16)
-        return [projected, q_weight, kv_weight]
+        return [
+            self.empty_bf16(5, q_dim + kv_c_dim + k_pe_dim),
+            self.empty_bf16(q_dim),
+            self.empty_bf16(kv_c_dim),
+        ]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        eps = self.epsilon
+    @property
+    def pattern(
+        self,
+    ) -> Callable[
+        ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ]:
+        eps = self._epsilon
 
-        def pattern(
+        def _pattern(
             projected: torch.Tensor,
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            # Derive split sizes from input shapes so the pattern
-            # re-traces correctly with any model's actual dimensions.
             q_dim = q_weight.shape[0]
             kv_dim = projected.shape[-1] - q_dim
             kv_c_dim = kv_weight.shape[0]
@@ -565,7 +575,17 @@ class MLADualRMSNormPattern:
             kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, eps)
             return q_normed, kv_normed, k_pe
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(
+        self,
+    ) -> Callable[
+        ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ]:
+        eps = self._epsilon
+
+        def _replacement(
             projected: torch.Tensor,
             q_weight: torch.Tensor,
             kv_weight: torch.Tensor,
@@ -576,48 +596,23 @@ class MLADualRMSNormPattern:
             k_pe_dim = kv_dim - kv_c_dim
             q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
             kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
-            result = torch.ops.vllm.fused_mla_dual_rms_norm(
+            q_normed, kv_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
                 q_c, q_weight, kv_c, kv_weight, eps, eps,
             )
-            return result[0], result[1], k_pe
+            return q_normed, kv_normed, k_pe
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-        )
+        return _replacement
 
 
-class MLADualRMSNormFusionPass(VllmPatternMatcherPass):
+class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     """
     Post-grad PatternMatcher pass that fuses paired q / kv RMS norms in
     MLA attention into ``fused_mla_dual_rms_norm`` backed by aiter's
     ``fused_qk_rmsnorm`` HIP kernel.
     """
 
-    @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config)
-
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="mla_dual_rms_norm_fusion_pass"
-        )
+        super().__init__(config, "mla_dual_rms_norm_fusion_pass")
 
         for epsilon in [1e-5, 1e-6]:
-            MLADualRMSNormPattern(epsilon).register(self.patterns)
-
-        self.dump_patterns(config, self.patterns)
-
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
-        if self.matched_count > 0:
-            logger.info(
-                "MLADualRMSNormFusionPass: fused %d q/kv norm pair(s)",
-                self.matched_count,
-            )
-
-    def uuid(self) -> str:
-        return VllmInductorPass.hash_source(self, MLADualRMSNormPattern)
+            self.register(MLADualRMSNormPattern(epsilon))
