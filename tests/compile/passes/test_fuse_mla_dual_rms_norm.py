@@ -55,25 +55,21 @@ class MLADualRMSNormTestModel(torch.nn.Module):
         self.kv_c_dim = kv_c_dim
         self.k_pe_dim = k_pe_dim
 
-        self.proj = torch.nn.Linear(
-            hidden_size, q_dim + self.kv_dim, bias=False
-        )
+        self.proj = torch.nn.Linear(hidden_size, q_dim + self.kv_dim, bias=False)
         self.q_norm = RMSNorm(q_dim, eps=eps)
         self.kv_norm = RMSNorm(kv_c_dim, eps=eps)
         self.q_b_proj = torch.nn.Linear(q_dim, hidden_size, bias=False)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Avoid graph input being a direct arg to a matched pattern node
         x = torch.relu(x)
 
         projected = self.proj(x)
 
-        q_c, kv_lora = projected.split(
-            [self.q_dim, self.kv_dim], dim=-1
-        )
-        kv_c, k_pe = kv_lora.split(
-            [self.kv_c_dim, self.k_pe_dim], dim=-1
-        )
+        q_c, kv_lora = projected.split([self.q_dim, self.kv_dim], dim=-1)
+        kv_c, k_pe = kv_lora.split([self.kv_c_dim, self.k_pe_dim], dim=-1)
 
         q_normed = self.q_norm(q_c)
         kv_normed = self.kv_norm(kv_c)
@@ -142,9 +138,7 @@ def test_fuse_mla_dual_rms_norm(
         model_fused = torch.compile(model, backend=backend)
         outputs_fused = model_fused(x)
 
-        torch.testing.assert_close(
-            outputs_unfused, outputs_fused, atol=1e-2, rtol=1e-2
-        )
+        torch.testing.assert_close(outputs_unfused, outputs_fused, atol=1e-2, rtol=1e-2)
 
         assert fusion_pass.matched_count == 1, (
             f"Expected 1 fused pair, got {fusion_pass.matched_count}"

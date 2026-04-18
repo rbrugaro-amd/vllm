@@ -555,9 +555,7 @@ class MLADualRMSNormPattern(
     @property
     def pattern(
         self,
-    ) -> Callable[
-        ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ]:
+    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         eps = self._epsilon
 
         def _pattern(
@@ -580,9 +578,7 @@ class MLADualRMSNormPattern(
     @property
     def replacement(
         self,
-    ) -> Callable[
-        ..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ]:
+    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         eps = self._epsilon
 
         def _replacement(
@@ -597,7 +593,12 @@ class MLADualRMSNormPattern(
             q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
             kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
             q_normed, kv_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
-                q_c, q_weight, kv_c, kv_weight, eps, eps,
+                q_c,
+                q_weight,
+                kv_c,
+                kv_weight,
+                eps,
+                eps,
             )
             return q_normed, kv_normed, k_pe
 
