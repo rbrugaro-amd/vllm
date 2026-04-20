@@ -379,7 +379,7 @@ _AITER_MLA_SUPPORTS_FP8: bool | None = None
 _AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
 
 
-def _check_aiter_fused_qk_rmsnorm() -> bool:
+def check_aiter_fused_qk_rmsnorm() -> bool:
     """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
     global _AITER_HAS_FUSED_QK_RMSNORM
     if _AITER_HAS_FUSED_QK_RMSNORM is None:
