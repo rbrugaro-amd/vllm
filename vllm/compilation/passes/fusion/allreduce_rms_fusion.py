@@ -1030,6 +1030,44 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             logger.warning("AITER allreduce fusion must be initialized")
             return
 
+        # Aiter's fused_allreduce_rmsnorm kernel dispatches on hidden_dim.
+        # Before aiter v0.1.12 the launcher was template-specialized on
+        # HIDDEN_DIM and only instantiated for {512, 1024, 2048, 4096}; for any
+        # other hidden_dim all three fallback paths (1-stage, 2-stage, split)
+        # hit the `default:` branch and silently skip the launch, producing
+        # garbage output. See the DISPATCH_AR_FUSION_KERNEL macro in aiter
+        # v0.1.10.post3:
+        # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
+        # From v0.1.12 onward `hidden_dim` became a runtime argument so any
+        # multiple of the pack size works. Detect the older API surface via
+        # the absence of the managed-buffer `_pool` attribute (introduced
+        # alongside the agnostic kernel) and disable this fusion pass for
+        # unsupported hidden sizes, so the original unfused
+        # allreduce + rms_norm subgraph stays in place.
+        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
+        if (
+            aiter_ar is not None
+            and not hasattr(aiter_ar, "_pool")
+            and hidden_dim not in _AITER_OLD_FUSED_AR_RMS_HIDDEN
+        ):
+            logger.warning_once(
+                "AITER allreduce-rmsnorm fusion disabled: aiter<0.1.12 "
+                "only supports hidden_dim in %s; got %d. Upgrade aiter to "
+                ">=0.1.12 to enable fusion for this model.",
+                _AITER_OLD_FUSED_AR_RMS_HIDDEN,
+                hidden_dim,
+            )
+            # Tear down the aiter custom-allreduce created by
+            # `initialize_aiter_allreduce()` above; otherwise its IPC handles
+            # stay registered on the TP group for the server lifetime and
+            # race with the vllm `ca_comm` used by the unfused allreduce
+            # path, corrupting allreduce results (logit collapse / all-`!`
+            # output on Kimi-K2 reproducer).
+            with contextlib.suppress(Exception):
+                rocm_aiter_ops.destroy_aiter_allreduce()
+            return
+
         max_token_num = (max_size / 2) // (hidden_dim * element_size)
         self.max_token_num = min(
             max_token_num,
