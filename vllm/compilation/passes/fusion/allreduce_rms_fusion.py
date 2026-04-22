@@ -1031,19 +1031,11 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             return
 
         # Aiter's fused_allreduce_rmsnorm kernel dispatches on hidden_dim.
-        # Before aiter v0.1.12 the launcher was template-specialized on
-        # HIDDEN_DIM and only instantiated for {512, 1024, 2048, 4096}; for any
-        # other hidden_dim all three fallback paths (1-stage, 2-stage, split)
-        # hit the `default:` branch and silently skip the launch, producing
-        # garbage output. See the DISPATCH_AR_FUSION_KERNEL macro in aiter
-        # v0.1.10.post3:
-        # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
-        # From v0.1.12 onward `hidden_dim` became a runtime argument so any
-        # multiple of the pack size works. Detect the older API surface via
-        # the absence of the managed-buffer `_pool` attribute (introduced
-        # alongside the agnostic kernel) and disable this fusion pass for
-        # unsupported hidden sizes, so the original unfused
-        # allreduce + rms_norm subgraph stays in place.
+        # Before aiter v0.1.12 the launcher was template-specialized on HIDDEN_DIM
+        # and silently no-op'd for sizes outside {512, 1024, 2048, 4096}. From v0.1.12
+        # hidden_dim is a runtime argument. Detect the older API via the missing
+        # `_pool` attribute and skip fusion for unsupported sizes.
+        # Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
         aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
         _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
         if (
@@ -1058,12 +1050,8 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
                 _AITER_OLD_FUSED_AR_RMS_HIDDEN,
                 hidden_dim,
             )
-            # Tear down the aiter custom-allreduce created by
-            # `initialize_aiter_allreduce()` above; otherwise its IPC handles
-            # stay registered on the TP group for the server lifetime and
-            # race with the vllm `ca_comm` used by the unfused allreduce
-            # path, corrupting allreduce results (logit collapse / all-`!`
-            # output on Kimi-K2 reproducer).
+            # Tear down aiter's custom-allreduce so its IPC handles don't
+            # race with vllm's ca_comm on the unfused fallback path.
             with contextlib.suppress(Exception):
                 rocm_aiter_ops.destroy_aiter_allreduce()
             return
