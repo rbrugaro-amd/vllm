@@ -934,7 +934,7 @@ class AiterAllreduceFusedRMSNormPattern(
         def _replacement(
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            residual = torch.empty_like(input)
+            residual = torch.zeros_like(input)
             allreduce = op(
                 input_=input,
                 residual=residual,
@@ -1041,12 +1041,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             logger.warning("AITER allreduce fusion must be initialized")
             return
 
-        # Aiter's fused_allreduce_rmsnorm kernel dispatches on hidden_dim.
-        # Before aiter v0.1.12 the launcher was template-specialized on
-        # HIDDEN_DIM and silently no-op'd for sizes outside
-        # {512, 1024, 2048, 4096}. From v0.1.12 hidden_dim is a runtime
-        # argument. Detect the older API via the missing `_pool` attribute
-        # and skip fusion for unsupported sizes.
+        # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
         hidden_dim = config.model_config.get_hidden_size()
         aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
         _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
@@ -1095,8 +1090,3 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return
         super().__call__(graph)
 
-    def __del__(self) -> None:
-        if getattr(self, "disabled", True):
-            return
-        with contextlib.suppress(Exception):
-            rocm_aiter_ops.destroy_aiter_allreduce()

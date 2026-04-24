@@ -1413,6 +1413,8 @@ class rocm_aiter_ops:
     def initialize_aiter_allreduce(
         cls, group: ProcessGroup, device: torch.device
     ) -> None:
+        if cls._CUSTOM_ALL_REDUCE is not None:
+            return
         try:
             from aiter.dist.device_communicators.custom_all_reduce import (
                 CustomAllreduce as AiterCustomAllreduce,
