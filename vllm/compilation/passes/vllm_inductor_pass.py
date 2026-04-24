@@ -224,6 +224,11 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
         """Example tensors used to trace pattern and replacement."""
         ...
 
+    @property
+    def extra_check(self) -> Callable[..., bool] | None:
+        """Optional extra_check passed to pm.register_replacement."""
+        return None
+
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
     @staticmethod
     def empty(*args, **kwargs) -> torch.Tensor:
@@ -277,12 +282,16 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def register(self, pr: VllmPatternReplacement) -> None:
+        kwargs: dict[str, Any] = {}
+        if pr.extra_check is not None:
+            kwargs["extra_check"] = pr.extra_check
         pm.register_replacement(
             pr.pattern,
             pr.replacement,
             pr.get_inputs(),
             self._trace_fn,
             self.pm_pass,
+            **kwargs,
         )
         self._pattern_replacements.append(pr)
 

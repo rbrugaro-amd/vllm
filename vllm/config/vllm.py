@@ -121,6 +121,15 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return (
+            rocm_aiter_ops.is_enabled()
+            and rocm_aiter_ops.is_rmsnorm_enabled()
+            and cfg.parallel_config.tensor_parallel_size > 1
+        )
+
     return (
         cfg.parallel_config.tensor_parallel_size > 1
         and current_platform.is_cuda()
@@ -1607,23 +1616,54 @@ class VllmConfig:
         if compile_range_end is not None:
             computed_compile_ranges_endpoints.append(compile_range_end)
 
-        # Add the compile ranges for flashinfer
+        # Add the compile ranges for allreduce-rms fusion
         if compilation_config.pass_config.fuse_allreduce_rms:
-            tp_size = self.parallel_config.tensor_parallel_size
-            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
-            if max_size is not None:
-                assert isinstance(self.model_config.dtype, torch.dtype)
-                max_token_num = max_size // (
-                    self.model_config.get_hidden_size()
-                    * self.model_config.dtype.itemsize
-                )
-                if compile_range_end is not None and max_token_num < compile_range_end:
-                    computed_compile_ranges_endpoints.append(max_token_num)
-                else:
-                    logger.debug(
-                        "Max num batched tokens below allreduce-rms fusion threshold, "
-                        "allreduce-rms fusion will be enabled for all num_tokens."
+            from vllm.platforms import current_platform as _platform
+
+            if _platform.is_rocm():
+                from vllm._aiter_ops import rocm_aiter_ops
+
+                if rocm_aiter_ops.is_enabled():
+                    aiter_max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+                    assert isinstance(self.model_config.dtype, torch.dtype)
+                    max_token_num = int(
+                        (aiter_max_size / 2)
+                        // (
+                            self.model_config.get_hidden_size()
+                            * self.model_config.dtype.itemsize
+                        )
                     )
+                    if (
+                        compile_range_end is not None
+                        and max_token_num < compile_range_end
+                    ):
+                        computed_compile_ranges_endpoints.append(max_token_num)
+                    else:
+                        logger.debug(
+                            "Max num batched tokens below AITER allreduce-rms "
+                            "fusion threshold, fusion will be enabled for all "
+                            "num_tokens."
+                        )
+            else:
+                tp_size = self.parallel_config.tensor_parallel_size
+                max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+                if max_size is not None:
+                    assert isinstance(self.model_config.dtype, torch.dtype)
+                    max_token_num = max_size // (
+                        self.model_config.get_hidden_size()
+                        * self.model_config.dtype.itemsize
+                    )
+                    if (
+                        compile_range_end is not None
+                        and max_token_num < compile_range_end
+                    ):
+                        computed_compile_ranges_endpoints.append(max_token_num)
+                    else:
+                        logger.debug(
+                            "Max num batched tokens below allreduce-rms fusion "
+                            "threshold, allreduce-rms fusion will be enabled "
+                            "for all num_tokens."
+                        )
 
         # Add the compile ranges for sequence parallelism
         if compilation_config.pass_config.enable_sp:

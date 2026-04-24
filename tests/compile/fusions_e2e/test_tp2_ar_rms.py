@@ -19,6 +19,8 @@ from .models import (
     FLASHINFER_ATTN,
     FLASHINFER_MLA_ATTN,
     FLASHMLA_SPARSE_ATTN,
+    ROCM_AITER_UNIFIED_ATTN,
+    ROCM_ATTN,
     TRITON_ATTN,
     deepseek_coder_v2_lite_fp8,
     deepseek_v3_fp8,
@@ -32,8 +34,6 @@ from .models import (
     qwen3_a3b,
     qwen3_a3b_fp8,
 )
-
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -54,6 +54,7 @@ pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only tes
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 def test_tp2_ar_rms_fp8_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -123,6 +124,7 @@ def test_tp2_ar_rms_fp8_fusions(
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 def test_tp2_ar_rms_fp4_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -175,10 +177,19 @@ def test_tp2_ar_rms_fp4_fusions(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b, qwen3_a3b, gpt_oss_20b],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        TRITON_ATTN,
+        FLASHINFER_ATTN,
+        ROCM_ATTN,
+        ROCM_AITER_UNIFIED_ATTN,
+    ],
+)
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
+@pytest.mark.parametrize("custom_ops", tuple(custom_ops_combos("rms_norm")))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Only test CUDA/ROCm")
 def test_tp2_ar_rms_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
@@ -220,4 +231,5 @@ def test_tp2_ar_rms_fusions(
         compilation_config,
         matches_check,
         tp_size=2,
+        use_aiter=current_platform.is_rocm(),
     )
