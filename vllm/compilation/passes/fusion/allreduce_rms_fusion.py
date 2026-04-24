@@ -1067,15 +1067,32 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
 
         for epsilon in [1e-5, 1e-6]:
             self.register(AiterAllreduceFusedRMSNormPattern(epsilon, self.model_dtype))
-            self.register(
-                AiterAllreduceFusedAddRMSNormPattern(epsilon, self.model_dtype)
-            )
+            add_rms = AiterAllreduceFusedAddRMSNormPattern(epsilon, self.model_dtype)
+            self.register(add_rms)
+            self._register_first_return_only(add_rms)
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
         self.disabled = False
         self.dump_patterns(config, self.pm_pass)
+
+    @staticmethod
+    def _trace_fn(*args: Any, **kwargs: Any) -> fx.GraphModule:
+        return pm.fwd_only(*args, **kwargs)
+
+    @enable_fake_mode
+    def _register_first_return_only(
+        self, pr: "AiterAllreduceFusedAddRMSNormPattern"
+    ) -> None:
+        first_return_only = lambda fn: lambda a, b, c: fn(a, b, c)[0]
+        pm.register_replacement(
+            first_return_only(pr.pattern),
+            first_return_only(pr.replacement),
+            pr.get_inputs(),
+            pm.fwd_only,
+            self.pm_pass,
+        )
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
@@ -1090,3 +1107,8 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return
         super().__call__(graph)
 
+    def __del__(self) -> None:
+        if getattr(self, "disabled", True):
+            return
+        with contextlib.suppress(Exception):
+            rocm_aiter_ops.destroy_aiter_allreduce()
