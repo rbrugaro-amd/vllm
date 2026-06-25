@@ -1,0 +1,67 @@
+I am a performance engineer at AMD working on GPU optimizations for MI355 GPUS. I need to give a technical presentation to engineers that are now very knowledgeable on how pytorch cuda graph, compilation works with special focus on how to bring performance uplifts such as fusions to VLLM. I want presentation to be comprehensive starting from basic concept and ramping to in depth technical details. My idea is we start with intro and then we use one of PR fusion examples to explain and show the methodolody.
+Resources I found useful:
+https://github.com/vllm-project/vllm/blob/e01a1ffeb3638c03d394dbf99db4ca16a5fd6db8/docs/design/torch_compile.md
+https://github.com/vllm-project/vllm/blob/e01a1ffeb3638c03d394dbf99db4ca16a5fd6db8/docs/design/vllm_ir.md
+https://github.com/vllm-project/vllm/blob/e01a1ffeb3638c03d394dbf99db4ca16a5fd6db8/docs/design/debug_vllm_compile.md
+https://vllm.ai/blog/2025-08-20-torch-compile
+(my PR to use as example) https://github.com/vllm-project/vllm/pull/39242
+
+Topics (at minimum) i want to touch on:
+-cuda graph vs. torch compile - benefits of each. 
+-VLLM optimization philosofy, instead of making model changes everywhere, rely on compiler. Mention how this differs from SGLANG without going into too much detail
+-piecewise compilation vs. piecewise graph
+-detail compilation flow w code tansformation
+-vllm IR, why it was added.
+-nuances: what happens when code has multiplexes like based on batch size (torch cond), vllm mechanism to register a "black box" operator that wont get compiled (benefits of doing this, when to use)
+-on the practical side: example of compile config and what each mean and when needed, what are DEBUG BKM (we may run this with my PR to show example as we explain)
+
+Before we dive in the presentation itself i want you to create an MD file with a possible outline, with main container ideas and concepts. we will use this to make deep dives in different topics until we are happy with outline and content and proceed with preparing the content
+
+
+Python model code (model.forward())
+          │
+          ▼
+    ┌─────────────┐
+    │  1. DYNAMO   │  ──  Traces Python into an FX graph
+    │   (capture)  │      Output: transformed_code.py
+    └──────┬──────┘
+           │
+           ▼
+    ┌──────────────────────┐
+    │  2. PRE-GRAD PASSES  │  ──  High-level graph rewrites (FX IR)
+    │   (vLLM + PyTorch)   │      Output: BEFORE_PRE_GRAD.{0..61}.py
+    └──────┬───────────────┘      + patterns.*.py (what was matched)
+           │
+           ▼
+    ┌──────────────────────┐
+    │  3. FUNCTIONALIZATION │  ──  Makes graph functional (no mutation)
+    │   + DECOMPOSITION    │      Output: __compiled_fn_1_*.py
+    └──────┬───────────────┘      + pre_insert_deferred_runtime_asserts_*.py
+           │
+           ▼
+    ┌──────────────────────┐
+    │  4. BEFORE SPLIT     │  ──  Full graph, one giant function (12,392 lines)
+    │                      │      Output: before_split.0.py / pre_split_module.0.py
+    └──────┬───────────────┘
+           │
+           ▼
+    ┌──────────────────────┐
+    │  5. THE SPLIT        │  ──  Partitions into "compilable" vs "fallback" subgraphs
+    └──────┬───────────────┘
+           │
+           ▼
+    ┌──────────────────────┐
+    │  6. AFTER SPLIT      │  ──  Post-split graph (13,435 lines -- slightly larger)
+    │                      │      Output: after_split.0.py / post_split_module.0.py
+    └──────┬───────────────┘
+           │
+           ▼
+    ┌──────────────────────┐
+    │  7. INDUCTOR          │  ──  Lowers to Triton GPU kernels
+    │   (code generation)  │      Output: kernel_{0..9}.py
+    └──────┬───────────────┘      + full_code_for_forward_0.py (Python wrapper)
+           │                      + .best_config (autotuning results)
+           ▼
+        GPU execution
+
+
