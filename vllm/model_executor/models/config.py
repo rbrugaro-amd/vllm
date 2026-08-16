@@ -345,8 +345,9 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     Kimi-K3 ships its routed experts as compressed-tensors
     ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
     lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
-    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
-    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    selection. Rewriting ``quant_method`` to ``"kimi_k3_mxfp4"`` selects
+    ``KimiK3Mxfp4Config`` (hence ``Mxfp4MoEMethod``) with its full backend set,
+    plus MXFP4 for the two dense latent-MoE projections, while any non-MXFP4
     checkpoint is left untouched. Covers both the main model and the MTP draft.
 
     ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
@@ -369,7 +370,7 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 and quant_config.get("quant_method") == "compressed-tensors"
                 and quant_config.get("format") == "mxfp4-pack-quantized"
             ):
-                quant_config["quant_method"] = "mxfp4"
+                quant_config["quant_method"] = "kimi_k3_mxfp4"
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):

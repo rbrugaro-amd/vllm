@@ -34,6 +34,8 @@ class ROCmLatentMoERunner(MoERunner):
         tp_size = self.moe_config.tp_size
 
         self._up_proj_shard_size = 0
+        self._up_proj = up_proj
+        self._up_proj_dense: bool | None = None
         self._tail_shardable = (
             up_proj is not None
             and tp_size > 1
@@ -52,6 +54,32 @@ class ROCmLatentMoERunner(MoERunner):
                 scope="global",
             )
         self._logged_sharded_tail = False
+
+    def _tail_shardable_now(self) -> bool:
+        """Re-check shardability against the *processed* weight.
+
+        ``_tail_shardable`` is computed in ``__init__``, before
+        ``process_weights_after_loading`` runs, so it cannot see whether the
+        up-projection ended up quantized. The beta-add epilogue in
+        ``_shard_up_proj_tail`` indexes ``.weight`` as a dense (N, K) matrix of
+        the activation dtype; a quantized up-projection stores packed values
+        plus separate scales, which ``narrow()``/``addmm_()`` would silently
+        reinterpret. Fall back to the replicated path in that case.
+        """
+        if not self._tail_shardable:
+            return False
+        if self._up_proj_dense is None:
+            weight = self._up_proj.weight
+            self._up_proj_dense = weight.is_floating_point()
+            if not self._up_proj_dense:
+                logger.warning_once(
+                    "K3 latent-MoE tail: up-projection weight is %s, not a "
+                    "dense floating tensor, so the sharded tail is disabled "
+                    "and the replicated up-projection is used instead.",
+                    weight.dtype,
+                    scope="global",
+                )
+        return self._up_proj_dense
 
     def _shard_up_proj_tail(
         self,
@@ -82,6 +110,7 @@ class ROCmLatentMoERunner(MoERunner):
         up_proj_shard = transform.up_proj.weight.narrow(0, shard_start, shard_size)
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
+
         # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
         # beta-add epilogue so folding in the shared partial costs no kernel.
         hidden_shard.addmm_(latent, up_proj_shard.t())
@@ -97,7 +126,7 @@ class ROCmLatentMoERunner(MoERunner):
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self._tail_shardable and not self._fused_output_is_reduced:
+        if self._tail_shardable_now() and not self._fused_output_is_reduced:
             return self._fused_forward(
                 hidden_states, router_logits, input_ids, shared_experts_input
             )

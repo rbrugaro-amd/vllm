@@ -138,6 +138,97 @@ class GptOssMxfp4Config(Mxfp4Config):
         return GptOssMxfp4MoEMethod(moe)
 
 
+# Kimi-K3 stores its routed experts as MXFP4 but keeps the two dense latent-MoE
+# projections that bracket them in bf16. They are quantizable from that same
+# checkpoint -- the weights are plain bf16 tensors -- so this config offers them
+# to the online MXFP4 linear method on hardware that has a native MXFP4 GEMM.
+_KIMI_K3_LATENT_PROJECTIONS = (
+    "routed_expert_down_proj",
+    "routed_expert_up_proj",
+)
+
+
+class KimiK3Mxfp4Config(Mxfp4Config):
+    """MXFP4 config for Kimi-K3 checkpoints.
+
+    Identical to :class:`Mxfp4Config` except that the two latent-MoE
+    projections are quantized to MXFP4 at load instead of being left in bf16,
+    on platforms with a native MXFP4 linear kernel.
+
+    K3's routed experts already ship as MXFP4 (compressed-tensors
+    ``mxfp4-pack-quantized``, rewritten to this config by
+    ``KimiK3ForConditionalGenerationConfig``), but ``routed_expert_down_proj``
+    (hidden -> latent) and ``routed_expert_up_proj`` (latent -> hidden) are
+    stored in bf16 and were previously constructed with ``quant_config=None``.
+    Quantizing them trades decode latency for prefill throughput and memory --
+    see the PR for the measured crossover -- so it is gated on the platform
+    actually having a native kernel rather than falling back to emulation.
+    """
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "kimi_k3_mxfp4"
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None
+    ) -> QuantizationMethods | None:
+        if not (
+            isinstance(hf_quant_cfg, dict)
+            and hf_quant_cfg.get("quant_method") in ("mxfp4", "kimi_k3_mxfp4")
+        ):
+            return None
+        # Require explicit confirmation that this is a Kimi-K3 model, so that
+        # this subclass never claims another producer's mxfp4 checkpoint.
+        if getattr(hf_config, "model_type", None) != "kimi_k3":
+            return None
+        return "kimi_k3_mxfp4"
+
+    @staticmethod
+    def _is_latent_projection(prefix: str) -> bool:
+        return prefix.rsplit(".", 1)[-1] in _KIMI_K3_LATENT_PROJECTIONS
+
+    def _latent_projections_quantizable(self) -> bool:
+        """Only claim the latent projections where a native MXFP4 linear
+        kernel exists; emulation would be far slower than the bf16 path."""
+        from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kMxfp4Dynamic,
+        )
+
+        try:
+            kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
+        except Exception:
+            return False
+        return type(kernel).__name__ != "EmulationMxfp4LinearKernel"
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        if (
+            isinstance(layer, LinearBase)
+            and self._is_latent_projection(prefix)
+            and not (
+                self.ignored_layers
+                and is_layer_skipped(
+                    prefix=prefix,
+                    ignored_layers=self.ignored_layers,
+                    fused_mapping=self.packed_modules_mapping,
+                )
+            )
+            and self._latent_projections_quantizable()
+        ):
+            from vllm.model_executor.layers.quantization.online.mxfp4 import (
+                Mxfp4OnlineLinearMethod,
+            )
+
+            logger.info_once(
+                "Kimi-K3: quantizing the latent-MoE projections to MXFP4.",
+            )
+            return Mxfp4OnlineLinearMethod()
+        return super().get_quant_method(layer, prefix)
+
+
 class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 

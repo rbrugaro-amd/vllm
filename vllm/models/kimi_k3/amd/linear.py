@@ -246,7 +246,7 @@ class KimiMoE(nn.Module):
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -258,7 +258,7 @@ class KimiMoE(nn.Module):
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.routed_expert_up_proj",
             )
             self.routed_output_transform = KimiRoutedOutputTransform(

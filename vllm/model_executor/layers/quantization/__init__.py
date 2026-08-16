@@ -32,6 +32,7 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "gpt_oss_mxfp4",
+    "kimi_k3_mxfp4",
     "deepseek_v4_fp8",
     "online",
     # Below are online quant shorthand names (see vllm.config.quantization).
@@ -132,7 +133,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         ModelOptNvFp4Config,
     )
     from .moe_wna16 import MoeWNA16Config
-    from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
+    from .mxfp4 import GptOssMxfp4Config, KimiK3Mxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
 
@@ -158,6 +159,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
+        "kimi_k3_mxfp4": KimiK3Mxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
