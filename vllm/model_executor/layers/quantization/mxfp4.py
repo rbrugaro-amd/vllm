@@ -189,8 +189,19 @@ class KimiK3Mxfp4Config(Mxfp4Config):
         return prefix.rsplit(".", 1)[-1] in _KIMI_K3_LATENT_PROJECTIONS
 
     def _latent_projections_quantizable(self) -> bool:
-        """Only claim the latent projections where a native MXFP4 linear
-        kernel exists; emulation would be far slower than the bf16 path."""
+        """Opt-in, and only where a native MXFP4 linear kernel exists.
+
+        Off by default: these two GEMMs beat bf16 only above M~256 and are
+        0.5-0.9x below it, so quantizing them helps a prefill-bound deployment
+        and hurts a decode-bound one. Emulation would be slower still, so a
+        platform without a native kernel never takes this path even when the
+        flag is set.
+        """
+        import vllm.envs as envs
+
+        if not envs.VLLM_KIMI_K3_LATENT_MXFP4:
+            return False
+
         from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             kMxfp4Dynamic,
@@ -223,7 +234,8 @@ class KimiK3Mxfp4Config(Mxfp4Config):
             )
 
             logger.info_once(
-                "Kimi-K3: quantizing the latent-MoE projections to MXFP4.",
+                "Kimi-K3: VLLM_KIMI_K3_LATENT_MXFP4=1, quantizing the "
+                "latent-MoE projections to MXFP4.",
             )
             return Mxfp4OnlineLinearMethod()
         return super().get_quant_method(layer, prefix)

@@ -359,6 +359,15 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        import vllm.envs as envs
+
+        # Only route to the K3 subclass when the latent-projection MXFP4 opt-in
+        # is set. Otherwise resolve to plain Mxfp4Config exactly as before, so
+        # the default path -- including the reported quantization name and the
+        # config hash -- is unchanged.
+        target = (
+            "kimi_k3_mxfp4" if envs.VLLM_KIMI_K3_LATENT_MXFP4 else "mxfp4"
+        )
         for cfg in (
             model_config.hf_config,
             model_config.hf_text_config,
@@ -370,7 +379,7 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
                 and quant_config.get("quant_method") == "compressed-tensors"
                 and quant_config.get("format") == "mxfp4-pack-quantized"
             ):
-                quant_config["quant_method"] = "kimi_k3_mxfp4"
+                quant_config["quant_method"] = target
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):

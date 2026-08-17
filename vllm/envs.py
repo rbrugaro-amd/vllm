@@ -209,6 +209,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_RS: bool = False
+    VLLM_KIMI_K3_LATENT_MXFP4: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1615,6 +1616,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
+    # Kimi K3 only. Quantize the two dense latent-MoE projections
+    # (routed_expert_down_proj, routed_expert_up_proj) to MXFP4 at load instead
+    # of leaving them bf16. Off by default: it is a prefill/memory trade, not a
+    # free win -- these GEMMs beat bf16 only above M~256 and are 0.5-0.9x below
+    # it, so a decode-dominated deployment loses. Requires a native MXFP4
+    # linear kernel (gfx950); ignored otherwise.
+    "VLLM_KIMI_K3_LATENT_MXFP4": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_LATENT_MXFP4", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
