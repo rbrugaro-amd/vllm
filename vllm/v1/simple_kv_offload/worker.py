@@ -9,13 +9,14 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend, TransferEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.stats import SimpleCPUOffloadStats
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -50,6 +51,7 @@ class SimpleCPUOffloadWorker:
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.device: torch.device | None = None
         self.num_cpu_blocks: int = 0
+        self.total_bytes_per_block: int = 0
 
         # CUDA streams for the async transfers
         self.load_stream: torch.cuda.Stream | None = None
@@ -57,9 +59,9 @@ class SimpleCPUOffloadWorker:
 
         self._backend: DmaCopyBackend | DiskBackend | None = None
 
-        # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        # Ordered by event_idx, appended by the backend once submitted.
+        self._load_events: list[TransferEvent] = []
+        self._store_events: list[TransferEvent] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -77,6 +79,9 @@ class SimpleCPUOffloadWorker:
         self._pending_store_event_indices: set[int] = set()
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
+
+        # Transfer volume/duration for this rank, drained by get_stats().
+        self._stats = SimpleCPUOffloadStats()
 
     def register_kv_caches(
         self,
@@ -135,6 +140,7 @@ class SimpleCPUOffloadWorker:
             t.stride(0) * t.element_size() for t in unique_gpu_caches.values()
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
+        self.total_bytes_per_block = total_bytes_per_block
 
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
 
@@ -268,6 +274,8 @@ class SimpleCPUOffloadWorker:
                     is_store=False,
                     event_idx=metadata.load_event,
                     events_list=self._load_events,
+                    num_bytes=len(metadata.load_cpu_blocks)
+                    * self.total_bytes_per_block,
                 )
             if metadata.store_gpu_blocks:
                 if self._store_compute_done is None:
@@ -280,6 +288,8 @@ class SimpleCPUOffloadWorker:
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
                     wait_event=self._store_compute_done,
+                    num_bytes=len(metadata.store_gpu_blocks)
+                    * self.total_bytes_per_block,
                 )
 
         # (2) Track completed transfer events
@@ -323,14 +333,16 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        for event_idx, event in self._load_events:
-            event.synchronize()
-            self._load_hwm = event_idx
+        for record in self._load_events:
+            record.done_event.synchronize()
+            self._load_hwm = record.event_idx
+            self._record_transfer(record, is_store=False)
         self._load_events.clear()
 
-        for event_idx, event in self._store_events:
-            event.synchronize()
-            self._store_hwm = event_idx
+        for record in self._store_events:
+            record.done_event.synchronize()
+            self._store_hwm = record.event_idx
+            self._record_transfer(record, is_store=True)
         self._store_events.clear()
 
     def _poll_stream_events(self, is_store: bool) -> int:
@@ -338,13 +350,28 @@ class SimpleCPUOffloadWorker:
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
-            event_idx, event = events[0]
-            if not event.query():
+            record = events[0]
+            if not record.done_event.query():
                 break
-            hwm = event_idx
+            hwm = record.event_idx
             events.pop(0)
+            self._record_transfer(record, is_store)
         if is_store:
             self._store_hwm = hwm
         else:
             self._load_hwm = hwm
         return hwm
+
+    def _record_transfer(self, record: TransferEvent, is_store: bool) -> None:
+        """Attribute a completed transfer's bytes and device seconds to stats."""
+        if not record.num_bytes:
+            return
+        # elapsed_time() is in milliseconds and both events have completed.
+        seconds = record.start_event.elapsed_time(record.done_event) * 1e-3
+        self._stats.record_transfer(is_store, record.num_bytes, seconds)
+
+    def get_stats(self) -> SimpleCPUOffloadStats | None:
+        """Hand this rank's accumulated transfer stats to the framework."""
+        if self._stats.is_empty():
+            return None
+        return self._stats.clone_and_reset()

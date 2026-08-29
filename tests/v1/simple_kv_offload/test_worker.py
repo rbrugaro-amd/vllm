@@ -22,7 +22,7 @@ if not current_platform.is_cuda_alike():
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend, TransferEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
@@ -85,7 +85,7 @@ def _drive_store(
             wait_event = torch.Event()
             wait_event.record(compute_stream)
 
-        store_events: list[tuple[int, torch.Event]] = []
+        store_events: list[TransferEvent] = []
         backend.launch_copy(
             block_ids,
             block_ids,
@@ -148,8 +148,11 @@ class _RecordingBackend:
         event_idx,
         events_list,
         wait_event=None,
+        num_bytes=0,
     ) -> None:
-        self.calls.append({"is_store": is_store, "wait_event": wait_event})
+        self.calls.append(
+            {"is_store": is_store, "wait_event": wait_event, "num_bytes": num_bytes}
+        )
 
 
 def test_get_finished_passes_wait_event_for_store_only():
@@ -176,6 +179,79 @@ def test_get_finished_passes_wait_event_for_store_only():
     assert len(load_calls) == 1
     assert isinstance(store_calls[0]["wait_event"], torch.Event)
     assert load_calls[0]["wait_event"] is None
+
+
+def test_get_finished_reports_transfer_bytes():
+    """Launched transfers are sized as block count * bytes per block."""
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+    )
+    recording = _RecordingBackend()
+    worker._backend = recording
+    worker.total_bytes_per_block = 4096
+    worker._connector_metadata = SimpleCPUOffloadMetadata(
+        load_event=0,
+        load_gpu_blocks=[0, 1],
+        load_cpu_blocks=[0, 1],
+        store_event=1,
+        store_gpu_blocks=[2, 3, 4],
+        store_cpu_blocks=[2, 3, 4],
+    )
+
+    worker.get_finished(set())
+
+    by_dir = {c["is_store"]: c["num_bytes"] for c in recording.calls}
+    assert by_dir[False] == 2 * 4096
+    assert by_dir[True] == 3 * 4096
+
+
+def test_worker_records_transfer_stats():
+    """Real DMA transfers report their bytes and nonzero device seconds."""
+    backend, gpu, cpu = _make_backend()
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+    )
+    worker._backend = backend
+    worker.total_bytes_per_block = BLOCK_BYTES
+    block_ids = list(range(NUM_BLOCKS))
+    worker.bind_connector_metadata(
+        SimpleCPUOffloadMetadata(
+            load_event=0,
+            load_gpu_blocks=block_ids,
+            load_cpu_blocks=block_ids,
+            store_event=1,
+            store_gpu_blocks=block_ids,
+            store_cpu_blocks=block_ids,
+        )
+    )
+
+    worker.get_finished(set())
+    # Drop the metadata so the flush loop below cannot relaunch the transfers.
+    worker.clear_connector_metadata()
+
+    # The backend enqueues its events from a background thread, so wait for both
+    # directions to land instead of assuming they are visible on the first pass.
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        worker._flush_and_sync_all()
+        seen = worker._stats.reduce()
+        if "store transfers" in seen and "load transfers" in seen:
+            break
+        time.sleep(0.001)
+
+    stats = worker.get_stats()
+    assert stats is not None, "no transfer stats were recorded"
+    reduced = stats.reduce()
+    expected_gib = round(NUM_BLOCKS * BLOCK_BYTES / float(1024**3), 3)
+    for direction in ("store", "load"):
+        assert reduced[f"{direction} transfers"] == 1
+        assert reduced[f"{direction} GiB"] == expected_gib
+        assert reduced[f"{direction} seconds"] > 0.0
+
+    # get_stats() hands ownership to the framework and starts a fresh interval.
+    assert worker.get_stats() is None
+
+    backend.shutdown()
 
 
 def test_build_params_src_access_order():

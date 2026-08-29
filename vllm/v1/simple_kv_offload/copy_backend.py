@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from typing import NamedTuple
 
 import torch
 
@@ -20,6 +21,20 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 
 logger = init_logger(__name__)
+
+
+class TransferEvent(NamedTuple):
+    """A submitted transfer, reported by a backend to the worker.
+
+    ``start_event`` brackets the transfer with ``done_event`` so the worker can
+    attribute device-side seconds to it once ``done_event`` completes. Both
+    events are timing-enabled.
+    """
+
+    event_idx: int
+    done_event: torch.Event
+    start_event: torch.Event
+    num_bytes: int
 
 
 class DmaCopyBackend:
@@ -74,8 +89,9 @@ class DmaCopyBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[TransferEvent],
         wait_event: torch.Event | None = None,
+        num_bytes: int = 0,
     ) -> None:
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
@@ -88,6 +104,7 @@ class DmaCopyBackend:
                 event_idx,
                 events_list,
                 wait_event,
+                num_bytes,
             )
         )
 
@@ -120,11 +137,16 @@ class DmaCopyBackend:
                 event_idx,
                 events_list,
                 wait_event,
+                num_bytes,
             ) = item
             stream = store_stream if is_store else load_stream
             if wait_event is not None:
                 stream.wait_event(wait_event)
+            # Recorded after the wait so the measured span excludes time spent
+            # waiting on compute.
+            start_event = torch.Event(enable_timing=True)
+            start_event.record(stream)
             copy_blocks(src_blocks, dst_blocks, params)
-            event = torch.Event()
+            event = torch.Event(enable_timing=True)
             event.record(stream)
-            events_list.append((event_idx, event))
+            events_list.append(TransferEvent(event_idx, event, start_event, num_bytes))

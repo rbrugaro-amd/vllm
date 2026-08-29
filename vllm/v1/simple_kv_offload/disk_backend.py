@@ -18,6 +18,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.v1.simple_kv_offload.copy_backend import TransferEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
@@ -189,11 +190,12 @@ class DiskBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[TransferEvent],
         wait_event: torch.Event | None = None,
+        num_bytes: int = 0,
     ) -> None:
         q = self._store_queue if is_store else self._load_queue
-        q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
+        q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event, num_bytes))
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -240,13 +242,19 @@ class DiskBackend:
             item = self._store_queue.get()
             if item is None:
                 return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
+            (src_blocks, dst_blocks, event_idx, events_list, wait_event, num_bytes) = (
+                item
+            )
             if wait_event is not None:
                 stream.wait_event(wait_event)
+            # The span covers the whole staged job, so it includes the pwritev
+            # gaps this loop interleaves between block DMAs, not just DMA time.
+            start_event = torch.Event(enable_timing=True)
+            start_event.record(stream)
             self._do_store(src_blocks, dst_blocks, stream)
-            event = torch.Event()
+            event = torch.Event(enable_timing=True)
             event.record(stream)
-            events_list.append((event_idx, event))
+            events_list.append(TransferEvent(event_idx, event, start_event, num_bytes))
 
     def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
         written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
@@ -274,13 +282,18 @@ class DiskBackend:
             item = self._load_queue.get()
             if item is None:
                 return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
+            (src_blocks, dst_blocks, event_idx, events_list, wait_event, num_bytes) = (
+                item
+            )
             if wait_event is not None:
                 stream.wait_event(wait_event)
+            # As in _store_loop, the span includes interleaved preadv gaps.
+            start_event = torch.Event(enable_timing=True)
+            start_event.record(stream)
             self._do_load(src_blocks, dst_blocks, stream)
-            event = torch.Event()
+            event = torch.Event(enable_timing=True)
             event.record(stream)
-            events_list.append((event_idx, event))
+            events_list.append(TransferEvent(event_idx, event, start_event, num_bytes))
 
     def _do_store(
         self,
