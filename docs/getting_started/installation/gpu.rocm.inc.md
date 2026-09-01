@@ -422,7 +422,7 @@ You can build and run vLLM from source via the provided [docker/Dockerfile.rocm]
     }
     ```
 
-    To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
+    To build vllm on ROCm 10.0 for MI200 and MI300 series, you can use the default:
 
     ```bash
     DOCKER_BUILDKIT=1 docker build \
@@ -441,7 +441,7 @@ It is important that the user kicks off the docker build using buildkit. Either 
 }
 ```
 
-[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 7.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, and 6.4, in older vLLM branches.
+[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 10.0 by default, but also supports ROCm 5.7, 6.0, 6.1, 6.2, 6.3, 6.4, 7.0, and 7.2 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
@@ -449,7 +449,7 @@ It provides flexibility to customize the build of docker image using the followi
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
+To build vllm on ROCm 10.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .

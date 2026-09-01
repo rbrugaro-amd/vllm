@@ -7,7 +7,7 @@ set -ex
 
 # Extract build configuration from Dockerfile.rocm_base (single source of truth)
 # Extract ROCm version dynamically from Dockerfile.rocm_base
-# BASE_IMAGE format: rocm/dev-ubuntu-22.04:7.0-complete -> extracts "7.0"
+# BASE_IMAGE format: rocm/dev-ubuntu-22.04:10.0.0-full -> extracts "10.0"
 ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E 's/.*:([0-9]+\.[0-9]+).*/\1/' || echo "unknown")
 PYTHON_VERSION=$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
 PYTORCH_ROCM_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
